@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Translate guide/ultimate-guide.md from English to French.
+Translate guide/ultimate-guide.md from English into a target language.
 
-Output : guide/ultimate-guide.fr.md
-Resume : .translation-cache/ (chunk files, auto-cleaned on success)
+Usage  : python3 scripts/translate-guide.py [--lang fr|zh|...]
+Output : guide/ultimate-guide.<lang>.md
+Resume : .translation-cache-<lang>/ (chunk files, auto-cleaned on success)
 Model  : claude-sonnet-4-6
+
+Default language is French (fr) to preserve the original behaviour.
 """
 
+import argparse
 import sys
 import time
 import traceback
@@ -19,16 +23,35 @@ RETRY_BACKOFF = [5, 15, 30]  # seconds between retries
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SOURCE = Path("guide/ultimate-guide.md")
-OUTPUT = Path("guide/ultimate-guide.fr.md")
-CACHE  = Path(".translation-cache")
 MODEL  = "claude-sonnet-4-6"
 
 # Max lines before forcing a split at the next heading
 MAX_LINES_H2  = 200
 MAX_LINES_H3  = 450
 
-SYSTEM = """\
-You are a technical translator English → French for the Claude Code Ultimate Guide.
+# Supported target languages: code → human-readable name used in the prompt.
+LANGUAGES = {
+    "fr": "French",
+    "zh": "Simplified Chinese (简体中文)",
+}
+
+# Per-language note appended to the TRANSLATE section when extra guidance helps.
+LANG_NOTES = {
+    "zh": (
+        "- Use natural, idiomatic Simplified Chinese; do not translate "
+        "word-for-word\n"
+        "- Keep a single space between Chinese text and inline English terms "
+        "or `code` for readability"
+    ),
+}
+
+
+def build_system(lang_name: str, lang_code: str) -> str:
+    extra = LANG_NOTES.get(lang_code, "")
+    if extra:
+        extra = "\n" + extra
+    return f"""\
+You are a technical translator English → {lang_name} for the Claude Code Ultimate Guide.
 
 KEEP IN ENGLISH — do not translate:
 - All code blocks and inline code (`…`, ```…```)
@@ -39,10 +62,10 @@ KEEP IN ENGLISH — do not translate:
   SubAgent, TaskCreate, HEREDOC, worktree, compact, ultrathink
 - Markdown structural syntax: ##, **, *, >, |, ```, [ ], ( ), ---
 
-TRANSLATE to French:
+TRANSLATE to {lang_name}:
 - All prose, section titles (## headings text), table cell text, list items,
   callout text, admonitions, descriptions, explanations
-- Maintain technical, clear, direct tone — no marketing language
+- Maintain technical, clear, direct tone — no marketing language{extra}
 
 PRESERVE exactly:
 - All blank lines and spacing
@@ -81,6 +104,7 @@ def make_chunks(text: str) -> list[str]:
 
 def translate_chunk(
     client: anthropic.Anthropic,
+    system: str,
     chunk:  str,
     idx:    int,
     total:  int,
@@ -96,7 +120,7 @@ def translate_chunk(
             resp = client.messages.create(
                 model=MODEL,
                 max_tokens=8000,
-                system=SYSTEM,
+                system=system,
                 messages=[{"role": "user", "content": chunk}],
             )
             elapsed = time.time() - t0
@@ -130,7 +154,22 @@ def translate_chunk(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    CACHE.mkdir(exist_ok=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--lang",
+        default="fr",
+        choices=sorted(LANGUAGES),
+        help="Target language code (default: fr)",
+    )
+    args = parser.parse_args()
+
+    lang_code = args.lang
+    lang_name = LANGUAGES[lang_code]
+    output    = Path(f"guide/ultimate-guide.{lang_code}.md")
+    cache     = Path(f".translation-cache-{lang_code}")
+    system    = build_system(lang_name, lang_code)
+
+    cache.mkdir(exist_ok=True)
     client = anthropic.Anthropic()
 
     print(f"Reading {SOURCE} …")
@@ -139,20 +178,21 @@ def main() -> int:
     chunks      = make_chunks(content)
 
     cost_est = (total_words * 1.3 / 1e6 * 3) + (total_words * 1.3 * 1.1 / 1e6 * 15)
+    print(f"  Target: {lang_name}  →  {output}")
     print(f"  {total_words:,} words  |  {len(chunks)} chunks  |  ~${cost_est:.2f} est.")
     print(f"  Model: {MODEL}\n")
 
     t_start = time.time()
 
     for i, chunk in enumerate(chunks, 1):
-        chunk_file = CACHE / f"chunk_{i:04d}.md"
+        chunk_file = cache / f"chunk_{i:04d}.md"
 
         if chunk_file.exists():
             print(f"  [{i:3d}/{len(chunks)}] cached — skip")
             continue
 
         try:
-            result = translate_chunk(client, chunk, i, len(chunks))
+            result = translate_chunk(client, system, chunk, i, len(chunks))
             chunk_file.write_text(result, encoding="utf-8")
         except KeyboardInterrupt:
             print("\nInterrupted. Run again to resume from this chunk.")
@@ -164,26 +204,26 @@ def main() -> int:
             return 1
 
     # ── Assemble ──────────────────────────────────────────────────────────────
-    cached = sorted(CACHE.glob("chunk_*.md"))
+    cached = sorted(cache.glob("chunk_*.md"))
 
     if len(cached) != len(chunks):
         print(f"\nPartial: {len(cached)}/{len(chunks)} chunks done. Run again to continue.")
         return 1
 
-    print(f"\nAssembling {len(cached)} chunks → {OUTPUT}")
-    OUTPUT.write_text(
+    print(f"\nAssembling {len(cached)} chunks → {output}")
+    output.write_text(
         "\n\n".join(f.read_text(encoding="utf-8") for f in cached),
         encoding="utf-8",
     )
 
-    out_words = len(OUTPUT.read_text(encoding="utf-8").split())
+    out_words = len(output.read_text(encoding="utf-8").split())
     total_sec = time.time() - t_start
     print(f"Done! {out_words:,} words | {total_sec:.0f}s total")
 
     # Clean up cache
     for f in cached:
         f.unlink()
-    CACHE.rmdir()
+    cache.rmdir()
 
     return 0
 

@@ -49,6 +49,7 @@ dist/
 
 # Translation cache (chunked intermediate files, auto-cleaned on success)
 .translation-cache/
+.translation-cache-*/
 
 # Multi-provider (will be moved to dedicated repo)
 examples/multi-provider/
